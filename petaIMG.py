@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-from glob import glob
-import cv2
-
 
 import os, sys
 import numpy as np
@@ -18,20 +15,25 @@ ROWGROUP_SIZE_MB = 128 # The same as the default HDFS block size
 # The schema defines how the dataset schema looks like
 ImageSchema = Unischema('ImageSchema', [
     UnischemaField('path', np.string_, (), ScalarCodec(StringType()), False),
-    UnischemaField('image', np.uint8, (1080, 1920, 3), CompressedImageCodec('png'), False)
+    UnischemaField('image', np.uint8, (320, 263, 3), CompressedImageCodec('png'), False)
 ])
 
-output_url = "file:///home/jovyan/work/petastorm_ingest_test/"
+
+output_url = "file:///tmp/petastorm_ingest_test/"
 rows_count = 1
+
+def row_generator(x):
+    """Converts single row into a dictionary"""
+    print("Creating row for: " + x.path)
+    return {'path': x.path,
+            'image': np.reshape(x.image, (320,263,3))}
 
 def ingest_folder(images_folder, spark):
 
-    # List all images in the folder
-    image_files = sorted(glob(os.path.join(images_folder, "*.png")))
-
+    image_files = "file:///"+os.path.abspath(images_folder)+"/*.jpg"
+    print(image_files)
     # Read all images at once
     image_df = spark.read.format("image").load(image_files)
-    # image_df.count()
 
     print('Schema of image_df')
     print('--------------------------')
@@ -39,28 +41,36 @@ def ingest_folder(images_folder, spark):
 
     with materialize_dataset(spark, output_url, ImageSchema, ROWGROUP_SIZE_MB):
 
-        input_rdd = spark.sparkContext.parallelize(image_files) \
-            .map(lambda image_path:
-                    {ImageSchema.path.name: image_path,
-                     ImageSchema.image.name: cv2.imread(image_path)})
+        set_df = image_df.select(image_df.image.origin.alias('path'), image_df.image.data.alias('image'))
 
-        rows_rdd = input_rdd.map(lambda r: dict_to_spark_row(ImageSchema, r))
+        print('Schema of set_df')
+        print('--------------------------')
+        set_df.printSchema()
+        print(ImageSchema.as_spark_schema())
+        
+        print('Saving to parquet')
+        print('--------------------------')
+
+        rows_rdd = set_df.rdd\
+            .map(row_generator)\
+            .map(lambda x: dict_to_spark_row(ImageSchema, x))
 
         spark.createDataFrame(rows_rdd, ImageSchema.as_spark_schema()) \
             .coalesce(10) \
             .write \
             .mode('overwrite') \
-            .option('compression', 'none') \
+            .option('compression', 'snappy') \
             .parquet(output_url)
+
 
 def main():
 
     # Start the Spark session
-    spark = SparkSession.builder.config('spark.driver.memory', '4g').master('local[*]').getOrCreate()    
+    spark = SparkSession.builder.config('spark.driver.memory', '2g').master('local[*]').getOrCreate()    
     sc = spark.sparkContext
 
     # Ingest images and annotations for a given folder
-    ingest_folder("../work/data/JPEGImages", spark)
+    ingest_folder("../work/flower_photos/sample/", spark)
 
 if __name__ == '__main__':
     main()
